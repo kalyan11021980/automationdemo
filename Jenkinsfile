@@ -4,7 +4,7 @@ node(){
             checkout scm
         }
         stage("Install Deps") {
-            sh "export PATH=/sbin:/usr/sbin:/usr/bin:/usr/local/bin"
+            sh "export PATH=/Users/blackbox/.nvm/versions/node/v10.13.0/lib/node_modules/"
             sh "npm install"
             echo "deps installed"
         }
