@@ -1,20 +1,16 @@
-pipeline {
-  agent any
+node(){
     
-  tools {nodejs "nodejs"}
+//   tools {nodejs "nodejs"}
     
-  stages {
-        
     stage('Cloning Git') {
-      steps {
         checkout scm
-      }
+
     }
         
     stage('Install dependencies') {
-      steps {
-        sh 'npm install'
-      }
-    }      
-  }
+        nodejs('nodejs') {
+            sh 'npm install'
+        }
+        
+    }
 }
