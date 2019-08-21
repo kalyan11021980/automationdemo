@@ -7,7 +7,7 @@ pipeline {
         
     stage('Cloning Git') {
       steps {
-        git scm
+        checkout scm
       }
     }
         
