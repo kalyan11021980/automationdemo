@@ -1,16 +1,20 @@
-node(){
-    try {
-        stage("checkout"){
-            checkout scm
-        }
-        stage("Install Deps") {
-            sh "export PATH=/Users/blackbox/.nvm/versions/node/v10.13.0/lib/node_modules/"
-            sh "npm install"
-            echo "deps installed"
-        }
+pipeline {
+  agent any
+    
+  tools {nodejs "nodejs"}
+    
+  stages {
+        
+    stage('Cloning Git') {
+      steps {
+        git scm
+      }
     }
-    catch ( Exception e){
-        echo "Build failed"
-        error ${error}
-    }
+        
+    stage('Install dependencies') {
+      steps {
+        sh 'npm install'
+      }
+    }      
+  }
 }
