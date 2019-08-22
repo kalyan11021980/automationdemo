@@ -19,7 +19,7 @@ node(){
     }
 
     stage('Package Build') {
-        sh "cd dist/automationdemo/ && tar -zcvf bundle.tar.gz ."
+        sh "cd dist/automationdemo/ && tar -zcvf bundle.tar.gz"
     }
 
     stage('Artifacts Creation') {
