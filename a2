@@ -1,0 +1,598 @@
+import { Agent } from '@mastra/core';
+import { Memory } from '@mastra/memory';
+import { LibSQLStore } from '@mastra/libsql';
+import { openai } from '@ai-sdk/openai';
+import { z } from 'zod';
+import { conversationTool } from '../tools/conversation-tool';
+
+// Simple conversation state
+export const ConversationStateSchema = z.object({
+  stage: z.enum(['greeting', 'user_identification', 'provider_selection', 'form_analysis', 'info_collection', 'booking']),
+  userId: z.string().optional(),
+  userData: z.any().optional(),
+  selectedProvider: z.any().optional(),
+  collectedInfo: z.record(z.string()).optional(),
+});
+
+export type ConversationState = z.infer<typeof ConversationStateSchema>;
+
+// Create comprehensive memory configuration for the main booking agent
+const createBookingAgentMemory = () => new Memory({
+  storage: new LibSQLStore({
+    url: "file:./memory.db",
+  }),
+  options: {
+    // Conversation history configuration
+    lastMessages: 20, // Include more context for conversational agent
+    
+    // Disable semantic recall until vector store is configured
+    semanticRecall: false,
+    
+    // Working memory for persistent user information
+    workingMemory: {
+      enabled: true,
+      template: `# User Profile & Booking History
+
+## Personal Information
+- Name:
+- User ID:
+- Phone:
+- Email:
+- Date of Birth:
+- Address:
+- City:
+- State:
+- Zip Code:
+
+## Insurance Information
+- Insurance Provider:
+- Policy Number:
+- Group Number:
+
+## Preferences & History
+- Preferred Providers:
+- Preferred Appointment Times:
+- Previous Appointments:
+- Communication Preferences:
+- Accessibility Needs:
+
+## Current Session
+- Current Stage:
+- Selected Provider:
+- Appointment Details:
+- Outstanding Questions:
+
+## Notes
+- Special Instructions:
+- Medical Alerts:
+- Emergency Contact:
+`,
+    },
+  },
+});
+
+// Main booking agent that coordinates everything
+export const MainBookingAgent = new Agent({
+  name: "MainBookingAgent",
+  instructions: `You are a conversational appointment booking assistant with advanced memory capabilities. Your job is to:
+
+1. **Remember Users** - Use your working memory to remember user information, preferences, and booking history
+2. **Greet users** and understand they want to book an appointment
+3. **Get user ID** to load their account information (or remember from previous conversations)
+4. **Show provider options** based on their insurance, location, and past preferences
+5. **Coordinate with specialist agents** to analyze forms and collect information
+6. **Complete the booking** once all information is gathered
+7. **Learn from interactions** to improve future booking experiences
+
+**Memory Usage Guidelines:**
+- When a user provides their information, store it in working memory for future reference
+- Remember their preferred providers, appointment times, and communication style
+- Recall past booking attempts and their outcomes
+- Use semantic recall to find relevant past conversations
+- Personalize responses based on their history and preferences
+
+Keep responses friendly, clear, and helpful. Guide users step by step through the booking process.
+Reference their past interactions when appropriate to provide a personalized experience.
+
+When showing providers, format them clearly with numbers for easy selection.
+When asking for information, be specific about what you need and why.
+Always confirm important details before proceeding with booking.
+
+You have access to a conversation tool that can process user messages and maintain conversation state throughout the appointment booking process.`,
+
+  model: openai("gpt-4o-mini"),
+  tools: {
+    conversationTool,
+  },
+  memory: createBookingAgentMemory(),
+});
+
+/**
+ * Simple conversation state manager
+ */
+export class BookingConversationManager {
+  private conversationState: ConversationState = { stage: 'greeting' };
+
+  /**
+   * Process a user message and update conversation state
+   */
+  async processUserMessage(userMessage: string): Promise<string> {
+    console.log(`\n💬 User: ${userMessage}`);
+    console.log(`📊 Current stage: ${this.conversationState.stage}`);
+
+    try {
+      switch (this.conversationState.stage) {
+        case 'greeting':
+          return await this.handleGreeting(userMessage);
+        
+        case 'provider_selection':
+          return await this.handleProviderSelection(userMessage);
+        
+        case 'form_analysis':
+          return await this.handleFormAnalysis(userMessage);
+        
+        case 'info_collection':
+          return await this.handleInfoCollection(userMessage);
+        
+        case 'booking':
+          return await this.handleBooking(userMessage);
+        
+        default:
+          return await this.handleGreeting(userMessage);
+      }
+    } catch (error) {
+      console.error('❌ Error in conversation:', error);
+      return "I apologize, but I encountered an error. Let me help you start over with booking your appointment.";
+    }
+  }
+
+  /**
+   * Handle greeting and user identification
+   */
+  private async handleGreeting(userMessage: string): Promise<string> {
+    // Check if user provided a user ID or wants to book
+    const userIdMatch = userMessage.match(/user[_\s]*(?:id[:\s]*)?([a-zA-Z0-9_]+)/i);
+    const bookingIntent = /book|appointment|schedule|doctor|medical|visit/i.test(userMessage);
+    
+    if (userIdMatch) {
+      const userId = userIdMatch[1];
+      try {
+        // Load account service
+        const { accountService } = await import('../services/account-service');
+        await accountService.loadUserAccount(userId);
+        const userData = accountService.getAppointmentUserData();
+        
+        // Load providers
+        const { providerService } = await import('../services/provider-service');
+        await providerService.loadProviders();
+        const recommendations = providerService.getRecommendations(
+          userData.insuranceProvider,
+          userData.city
+        );
+
+        this.conversationState = {
+          stage: 'provider_selection',
+          userId,
+          userData,
+        };
+
+        return `Hello ${userData.firstName}! 👋 
+
+I've loaded your account information and found some great healthcare providers for you:
+
+${recommendations.map((provider, index) => 
+  `**${index + 1}. ${provider.name}**
+   ${provider.specialty} • ${provider.location} • ⭐ ${provider.rating}/5
+   Phone: ${provider.phone}`
+).join('\n\n')}
+
+Please choose a provider by number (1-${recommendations.length}), or tell me what type of appointment you need and I can help you find the right specialist.`;
+
+      } catch (error) {
+        return `I had trouble loading your account for user ID "${userId}". Please double-check your user ID, or you can use "user_12345" for a demo account.`;
+      }
+    }
+
+    if (bookingIntent) {
+      return `I'd be happy to help you book a medical appointment! 🏥
+
+To get started, please provide your user ID so I can access your account information and show you personalized provider recommendations.
+
+You can say something like "My user ID is user_12345" or just "user_12345".
+
+If you don't have a user ID, you can use "user_12345" for a demo account.`;
+    }
+
+    return `Hello! I'm your appointment booking assistant. 👋
+
+I can help you book medical appointments with healthcare providers in your area.
+
+To get started, just say:
+• "I need to book an appointment" 
+• "Help me schedule a doctor visit"
+• Or provide your user ID
+
+How can I help you today?`;
+  }
+
+  /**
+   * Handle provider selection
+   */
+  private async handleProviderSelection(userMessage: string): Promise<string> {
+    const numberMatch = userMessage.match(/(\d+)/);
+    
+    if (numberMatch) {
+      const selection = parseInt(numberMatch[1]) - 1;
+      
+      try {
+        const { providerService } = await import('../services/provider-service');
+        
+        // Get the same recommendations that were shown to the user
+        const recommendations = providerService.getRecommendations(
+          this.conversationState.userData?.insuranceProvider || 'BlueCross BlueShield',
+          this.conversationState.userData?.city || 'Boston'
+        );
+        
+        if (selection >= 0 && selection < recommendations.length) {
+          const selectedProvider = recommendations[selection];
+          
+          this.conversationState = {
+            ...this.conversationState,
+            stage: 'form_analysis',
+            selectedProvider,
+          };
+
+          // Automatically proceed with form analysis
+          return await this.analyzeFormAndContinue();
+        }
+      } catch (error) {
+        return "I had trouble accessing the provider information. Please try selecting a provider by number (1, 2, 3, etc.).";
+      }
+    }
+
+    return `Please choose a provider by number. For example, say "1" for the first provider, "2" for the second, etc.
+
+If you need to see the provider list again, just ask me to "show providers".`;
+  }
+
+  /**
+   * Analyze form and continue automatically
+   */
+  private async analyzeFormAndContinue(): Promise<string> {
+    if (!this.conversationState.selectedProvider) {
+      return "I need you to select a provider first. Let me show you the options again.";
+    }
+
+    const selectedProvider = this.conversationState.selectedProvider;
+
+    try {
+      // Import tools and agents
+      const { observeFormTool } = await import('../tools/stagehand-tools');
+      const { MapperAgent } = await import('./index');
+
+      console.log(`🔍 Analyzing form for ${selectedProvider.name}...`);
+      
+      // Observe the form
+      const observeResult = await observeFormTool.execute({
+        context: { url: selectedProvider.bookingUrl },
+        runtimeContext: {} as any,
+      });
+
+      if (!observeResult?.fields) {
+        throw new Error('Could not analyze the appointment form');
+      }
+
+      console.log(`✅ Found ${observeResult.fields.length} form fields`);
+
+      // Map user data to form fields
+      const mappingPrompt = `
+        Map available user data to form fields and identify missing information:
+        
+        User Data: ${JSON.stringify(this.conversationState.userData, null, 2)}
+        Form Fields: ${JSON.stringify(observeResult.fields, null, 2)}
+        
+        Return mappedFields (data we have) and missingFields (data we need to ask for).
+      `;
+
+      const mapperResult = await MapperAgent.generate(mappingPrompt, {
+        output: z.object({
+          mappedFields: z.array(z.object({
+            fieldId: z.string(),
+            value: z.string(),
+          })),
+          missingFields: z.array(z.string()),
+        }),
+      });
+
+      if (!mapperResult.object) {
+        throw new Error('Could not map form fields');
+      }
+
+      const { mappedFields, missingFields } = mapperResult.object;
+
+      if (missingFields.length === 0) {
+        this.conversationState = {
+          ...this.conversationState,
+          stage: 'booking',
+        };
+
+        return `Excellent choice! You've selected **${selectedProvider.name}**.
+
+📍 ${selectedProvider.address}
+📞 ${selectedProvider.phone}
+🏥 Services: ${selectedProvider.services.join(', ')}
+
+Perfect! I have all the information needed from your account:
+
+${mappedFields.map(field => `✅ ${field.fieldId}: ${field.value}`).join('\n')}
+
+I'm ready to book your appointment with **${selectedProvider.name}**.
+
+Would you like me to proceed with the booking? Just say "yes" to confirm or "no" if you want to make changes.`;
+      }
+
+      // Need to collect missing information
+      this.conversationState = {
+        ...this.conversationState,
+        stage: 'info_collection',
+        collectedInfo: {},
+      };
+
+      return `Excellent choice! You've selected **${selectedProvider.name}**.
+
+📍 ${selectedProvider.address}
+📞 ${selectedProvider.phone}
+🏥 Services: ${selectedProvider.services.join(', ')}
+
+I've analyzed the form and have most of your information from your account. However, I need a few more details:
+
+**Missing Information:**
+${missingFields.map((field, index) => `${index + 1}. ${field}`).join('\n')}
+
+Let's collect this information one by one. 
+
+**First, please tell me: ${missingFields[0]}**
+
+For example, if this is for a reason for visit, you might say "annual checkup" or "follow-up appointment".`;
+
+    } catch (error) {
+      console.error('❌ Error analyzing form:', error);
+      return `Excellent choice! You've selected **${selectedProvider.name}**.
+
+📍 ${selectedProvider.address}
+📞 ${selectedProvider.phone}
+🏥 Services: ${selectedProvider.services.join(', ')}
+
+I had trouble analyzing the appointment form automatically. This could be because:
+• The website is temporarily unavailable
+• The form structure has changed
+
+I can still help you book the appointment. Would you like me to:
+1. Try to book with the information from your account
+2. Ask you for additional details manually
+3. Provide their contact information to call directly
+
+What would you prefer?`;
+    }
+  }
+
+  /**
+   * Handle form analysis
+   */
+  private async handleFormAnalysis(userMessage: string): Promise<string> {
+    if (!this.conversationState.selectedProvider) {
+      return "I need you to select a provider first. Let me show you the options again.";
+    }
+
+    try {
+      // Import tools and agents
+      const { observeFormTool } = await import('../tools/stagehand-tools');
+      const { MapperAgent } = await import('./index');
+
+      console.log(`🔍 Analyzing form for ${this.conversationState.selectedProvider.name}...`);
+      
+      // Observe the form
+      const observeResult = await observeFormTool.execute({
+        context: { url: this.conversationState.selectedProvider.bookingUrl },
+        runtimeContext: {} as any,
+      });
+
+      if (!observeResult?.fields) {
+        throw new Error('Could not analyze the appointment form');
+      }
+
+      console.log(`✅ Found ${observeResult.fields.length} form fields`);
+
+      // Map user data to form fields
+      const mappingPrompt = `
+        Map available user data to form fields and identify missing information:
+        
+        User Data: ${JSON.stringify(this.conversationState.userData, null, 2)}
+        Form Fields: ${JSON.stringify(observeResult.fields, null, 2)}
+        
+        Return mappedFields (data we have) and missingFields (data we need to ask for).
+      `;
+
+      const mapperResult = await MapperAgent.generate(mappingPrompt, {
+        output: z.object({
+          mappedFields: z.array(z.object({
+            fieldId: z.string(),
+            value: z.string(),
+          })),
+          missingFields: z.array(z.string()),
+        }),
+      });
+
+      if (!mapperResult.object) {
+        throw new Error('Could not map form fields');
+      }
+
+      const { mappedFields, missingFields } = mapperResult.object;
+
+      if (missingFields.length === 0) {
+        this.conversationState = {
+          ...this.conversationState,
+          stage: 'booking',
+        };
+
+        return `Perfect! I have all the information needed from your account:
+
+${mappedFields.map(field => `✅ ${field.fieldId}: ${field.value}`).join('\n')}
+
+I'm ready to book your appointment with **${this.conversationState.selectedProvider.name}**.
+
+Would you like me to proceed with the booking? Just say "yes" to confirm or "no" if you want to make changes.`;
+      }
+
+      // Need to collect missing information
+      this.conversationState = {
+        ...this.conversationState,
+        stage: 'info_collection',
+        collectedInfo: {},
+      };
+
+      return `I've analyzed the form and have most of your information from your account. However, I need a few more details:
+
+**Missing Information:**
+${missingFields.map((field, index) => `${index + 1}. ${field}`).join('\n')}
+
+Let's collect this information one by one. 
+
+**First, please tell me: ${missingFields[0]}**
+
+For example, if this is for a reason for visit, you might say "annual checkup" or "follow-up appointment".`;
+
+    } catch (error) {
+      console.error('❌ Error analyzing form:', error);
+      return `I had trouble analyzing the appointment form for ${this.conversationState.selectedProvider.name}. 
+
+This could be because:
+• The website is temporarily unavailable
+• The form structure has changed
+
+Would you like to:
+1. Try a different provider
+2. Contact them directly at ${this.conversationState.selectedProvider.phone}
+
+What would you prefer?`;
+    }
+  }
+
+  /**
+   * Handle information collection (simplified)
+   */
+  private async handleInfoCollection(userMessage: string): Promise<string> {
+    // For now, we'll simulate successful collection
+    this.conversationState = {
+      ...this.conversationState,
+      stage: 'booking',
+      collectedInfo: { ...this.conversationState.collectedInfo, additionalInfo: userMessage },
+    };
+
+    return `Thank you! I've recorded that information: "${userMessage}"
+
+I now have everything needed to book your appointment with **${this.conversationState.selectedProvider.name}**.
+
+Would you like me to proceed with the booking? Say "yes" to confirm or "no" if you want to review the details.`;
+  }
+
+  /**
+   * Handle booking execution
+   */
+  private async handleBooking(userMessage: string): Promise<string> {
+    const confirmed = /yes|confirm|proceed|book|ok/i.test(userMessage);
+    
+    if (!confirmed) {
+      return `No problem! What would you like to do?
+
+1. Choose a different provider
+2. Modify the information
+3. Cancel the booking
+
+Just let me know your preference.`;
+    }
+
+    try {
+      if (!this.conversationState.selectedProvider) {
+        throw new Error('No provider selected');
+      }
+
+      // Simulate booking execution
+      console.log(`🔄 Executing booking for ${this.conversationState.selectedProvider.name}...`);
+
+      const { actOnFormTool } = await import('../tools/stagehand-tools');
+      
+      // Create actions from mapped fields (simplified)
+      const actions = [
+        { fieldId: 'field_0', value: this.conversationState.userData?.firstName || 'John', action: 'type' as const },
+        { fieldId: 'field_1', value: this.conversationState.userData?.lastName || 'Smith', action: 'type' as const },
+        { fieldId: 'field_2', value: this.conversationState.userData?.phone || '+1-555-0123', action: 'type' as const },
+        { fieldId: 'field_3', value: this.conversationState.userData?.email || 'john.smith@email.com', action: 'type' as const },
+      ];
+
+      const bookingResult = await actOnFormTool.execute({
+        context: {
+          url: this.conversationState.selectedProvider.bookingUrl,
+          actions: actions,
+          submitAction: "Submit the appointment booking form",
+        },
+        runtimeContext: {} as any,
+      });
+
+      if (bookingResult?.success) {
+        // Store provider info before resetting state
+        const providerName = this.conversationState.selectedProvider.name;
+        const providerAddress = this.conversationState.selectedProvider.address;
+        const providerPhone = this.conversationState.selectedProvider.phone;
+        
+        // Reset conversation state
+        this.conversationState = { stage: 'greeting' };
+
+        return `🎉 **Appointment Successfully Booked!**
+
+Your appointment has been scheduled with **${providerName}**.
+
+**Provider Details:**
+📍 ${providerAddress}
+📞 ${providerPhone}
+
+**Next Steps:**
+• Check your email for confirmation
+• Arrive 15 minutes early
+• Bring ID and insurance card
+
+Need to book another appointment? Just say "book appointment" and I'll help you again!`;
+      } else {
+        throw new Error('Booking failed');
+      }
+
+    } catch (error) {
+      console.error('❌ Booking failed:', error);
+      return `I apologize, but there was an issue completing your booking:
+
+**What you can do:**
+1. Try booking again
+2. Contact the provider directly: ${this.conversationState.selectedProvider?.phone}
+3. Choose a different provider
+
+Would you like me to help you with any of these options?`;
+    }
+  }
+
+  /**
+   * Get current conversation state
+   */
+  getState(): ConversationState {
+    return this.conversationState;
+  }
+
+  /**
+   * Reset conversation state
+   */
+  reset(): void {
+    this.conversationState = { stage: 'greeting' };
+  }
+}
+
+// Export singleton instance
+export const bookingConversationManager = new BookingConversationManager(); 
