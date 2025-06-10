@@ -1,0 +1,151 @@
+import { Agent } from '@mastra/core';
+import { Memory } from '@mastra/memory';
+import { LibSQLStore } from '@mastra/libsql';
+import { openai } from '@ai-sdk/openai';
+import { z } from 'zod';
+import { observeFormTool, actOnFormTool, extractInfoTool } from '../tools/stagehand-tools';
+
+// Output schemas for inter-agent communication
+export const ObserverOutputSchema = z.object({
+  fields: z.array(
+    z.object({
+      label: z.string().describe("The human-readable label for the form field, inferred from its description."),
+      fieldId: z.string().describe("A unique identifier for the field, like an XPath or CSS selector."),
+      fieldType: z.string().describe("The type of field (input, select, textarea, etc.)"),
+      required: z.boolean().describe("Whether this field appears to be required").optional(),
+    })
+  ),
+});
+
+export const MapperOutputSchema = z.object({
+  mappedFields: z
+    .array(
+      z.object({
+        fieldId: z.string(),
+        value: z.string(),
+        action: z.enum(["type", "select", "click"]).optional().default("type"),
+      })
+    )
+    .describe("An array of fields to be filled with user data."),
+  missingFields: z
+    .array(z.string())
+    .describe("An array of required field labels for which user data is missing."),
+});
+
+// Create memory configurations for different specialist agents
+const createSpecialistMemory = (agentType: string) => new Memory({
+  storage: new LibSQLStore({
+    url: `file:./specialist_${agentType.toLowerCase()}_memory.db`,
+  }),
+  options: {
+    lastMessages: 10, // Keep recent context for form analysis
+    semanticRecall: false, // Disable until vector store is configured
+    workingMemory: {
+      enabled: true,
+    },
+  },
+});
+
+// Observer Agent: Specialized in analyzing web pages to identify form fields
+export const ObserverAgent = new Agent({
+  name: "ObserverAgent",
+  instructions: `You are a web analysis expert specializing in appointment booking forms. Your job is to:
+  
+  1. Use the observeForm tool to identify all the fields on an appointment booking form
+  2. Analyze the form structure and identify required vs optional fields
+  3. Categorize field types (text input, dropdown, date picker, etc.)
+  4. Return a comprehensive list of all form fields with their properties
+  5. Remember past form structures to improve future analysis
+  
+  Focus on identifying fields commonly found in medical/service appointment forms such as:
+  - Personal information (name, email, phone, date of birth)
+  - Appointment details (date, time, reason for visit, provider)
+  - Insurance information
+  - Contact preferences
+  - Emergency contact details
+  
+  Use your working memory to track current analysis tasks and remember patterns from previous forms.`,
+  model: openai("gpt-4o-mini"),
+  tools: { observeFormTool },
+  memory: createSpecialistMemory("Observer"),
+});
+
+// Mapper Agent: Specialized in mapping user data to form fields
+export const MapperAgent = new Agent({
+  name: "MapperAgent",
+  instructions: `You are a data mapping specialist for appointment booking forms. Your task is to:
+
+  1. Compare user-provided information with a list of required form fields
+  2. Create a 'mappedFields' list for every field you have data for
+  3. Create a 'missingFields' list for any required fields you DON'T have data for
+  4. Be intelligent about data mapping using your memory of past mappings
+  5. Learn from previous successful mappings to improve accuracy
+  
+  Important mapping rules:
+  - If the user provides a full name like "John Doe", map it to separate "First Name" and "Last Name" fields
+  - If a field label mentions "email" or "e-mail", map the user's email address
+  - If a field mentions "phone" or "telephone", map the user's phone number
+  - If a field mentions "date of birth" or "DOB", map the user's birth date
+  - Be precise with field identification - use the field labels from the observer tool
+  - Remember successful mapping patterns for similar forms
+  
+  Use your working memory to track the current mapping task and reference past successful mappings.
+  
+  Always return both mappedFields and missingFields arrays, even if one is empty.`,
+  model: openai("gpt-4o-mini"),
+  memory: createSpecialistMemory("Mapper"),
+});
+
+// Filler Agent: Specialized in form filling and submission
+export const FillerAgent = new Agent({
+  name: "FillerAgent",
+  instructions: `You are a precise web automation agent specialized in filling appointment booking forms. Your job is to:
+  
+  1. Use the actOnForm tool to accurately fill in form fields as specified
+  2. Handle different types of form interactions (typing, selecting, clicking)
+  3. Follow the exact mapping provided by the MapperAgent
+  4. Submit the form after all fields are filled
+  5. Handle errors gracefully and provide detailed feedback
+  6. Learn from past form filling experiences to improve success rates
+  
+  Guidelines:
+  - Fill fields in a logical order (personal info first, then appointment details)
+  - Use appropriate delays between actions to ensure form stability
+  - Verify that data is entered correctly before proceeding
+  - If a field fails to fill, continue with other fields and report the issue
+  - Always attempt to submit the form at the end
+  - Remember successful filling strategies for similar forms
+  
+  Use your working memory to track the current filling task and remember successful techniques.`,
+  model: openai("gpt-4o-mini"),
+  tools: { actOnFormTool },
+  memory: createSpecialistMemory("Filler"),
+});
+
+// Coordinator Agent: Orchestrates the entire appointment booking process
+export const CoordinatorAgent = new Agent({
+  name: "CoordinatorAgent",
+  instructions: `You are the master coordinator for the appointment booking system. Your role is to:
+  
+  1. Orchestrate the entire appointment booking workflow
+  2. Coordinate between Observer, Mapper, and Filler agents
+  3. Handle user interactions and gather missing information
+  4. Make decisions about when to proceed or ask for more data
+  5. Provide status updates and error handling
+  6. Learn from past booking experiences to optimize workflows
+  
+  Workflow coordination:
+  - First, instruct the Observer to analyze the booking page
+  - Then, work with the Mapper to match user data with form fields
+  - If information is missing, clearly communicate what's needed
+  - Finally, coordinate with the Filler to complete the booking
+  - Provide clear status updates throughout the process
+  - Remember successful coordination patterns for similar providers
+  
+  Use your working memory to track the current booking workflow and reference past successful coordination strategies.
+  
+  Always prioritize user experience and clear communication about what's happening and what's needed.`,
+  model: openai("gpt-4o"),
+  tools: { observeFormTool, actOnFormTool, extractInfoTool },
+  memory: createSpecialistMemory("Coordinator"),
+}); 
