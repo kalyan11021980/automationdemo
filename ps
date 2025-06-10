@@ -1,0 +1,246 @@
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
+import { z } from 'zod';
+
+// Provider schema
+export const ProviderSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  specialty: z.string(),
+  description: z.string(),
+  location: z.string(),
+  bookingUrl: z.string().url(),
+  phone: z.string(),
+  address: z.string(),
+  acceptedInsurance: z.array(z.string()),
+  services: z.array(z.string()),
+  rating: z.number().min(0).max(5),
+  available: z.boolean(),
+});
+
+export const ProvidersDataSchema = z.object({
+  providers: z.array(ProviderSchema),
+  lastUpdated: z.string(),
+});
+
+export type Provider = z.infer<typeof ProviderSchema>;
+export type ProvidersData = z.infer<typeof ProvidersDataSchema>;
+
+export class ProviderService {
+  private providersData: ProvidersData | null = null;
+
+  /**
+   * Find the correct path to the providers data file
+   */
+  private findProvidersPath(): string {
+    const possiblePaths = [
+      // For Mastra playground
+      join(process.cwd(), '.mastra', 'output', 'src', 'data', 'providers.json'),
+      // For direct execution
+      join(process.cwd(), 'src', 'data', 'providers.json'),
+      join(process.cwd(), 'data', 'providers.json'),
+    ];
+
+    for (const path of possiblePaths) {
+      if (existsSync(path)) {
+        console.log(`📁 Found providers data at: ${path}`);
+        return path;
+      }
+    }
+
+    return join(process.cwd(), 'src', 'data', 'providers.json');
+  }
+
+  /**
+   * Load providers data from JSON file
+   */
+  async loadProviders(): Promise<ProvidersData> {
+    try {
+      let dataPath = this.findProvidersPath();
+      
+      if (!existsSync(dataPath)) {
+        // Use inline providers data if file not found
+        console.log(`⚠️ Providers file not found, using inline data`);
+        return this.getInlineProvidersData();
+      }
+      
+      const rawData = readFileSync(dataPath, 'utf-8');
+      const providersData = JSON.parse(rawData);
+      
+      // Validate the data
+      const validatedData = ProvidersDataSchema.parse(providersData);
+      this.providersData = validatedData;
+      
+      console.log(`✅ Loaded ${validatedData.providers.length} healthcare providers`);
+      return validatedData;
+    } catch (error) {
+      console.error('❌ Failed to load providers data:', error);
+      // Fallback to inline data
+      return this.getInlineProvidersData();
+    }
+  }
+
+  /**
+   * Inline providers data as fallback
+   */
+  private getInlineProvidersData(): ProvidersData {
+    const inlineData = {
+      providers: [
+        {
+          id: "lowell-family",
+          name: "Lowell Family Medical Practice",
+          specialty: "Family Medicine",
+          description: "Comprehensive family healthcare services",
+          location: "Lowell, MA",
+          bookingUrl: "https://lowellfamily.com/new-appointment/",
+          phone: "+1-978-123-4567",
+          address: "123 Healthcare Drive, Lowell, MA 01851",
+          acceptedInsurance: ["BlueCross BlueShield", "Aetna", "Cigna", "UnitedHealth"],
+          services: ["Annual Checkups", "Urgent Care", "Pediatrics", "Women's Health"],
+          rating: 4.8,
+          available: true
+        },
+        {
+          id: "boston-general",
+          name: "Boston General Hospital",
+          specialty: "Multi-Specialty",
+          description: "Full-service hospital with specialist appointments",
+          location: "Boston, MA",
+          bookingUrl: "https://bostongeneral.org/appointments",
+          phone: "+1-617-555-0123",
+          address: "456 Medical Center Ave, Boston, MA 02101",
+          acceptedInsurance: ["BlueCross BlueShield", "Harvard Pilgrim", "Tufts Health", "Medicare"],
+          services: ["Cardiology", "Neurology", "Orthopedics", "Emergency Care"],
+          rating: 4.6,
+          available: true
+        },
+        {
+          id: "cambridge-clinic",
+          name: "Cambridge Health Clinic",
+          specialty: "Internal Medicine",
+          description: "Internal medicine and preventive care specialists",
+          location: "Cambridge, MA",
+          bookingUrl: "https://cambridgehealth.com/book",
+          phone: "+1-617-555-0456",
+          address: "789 University Ave, Cambridge, MA 02139",
+          acceptedInsurance: ["BlueCross BlueShield", "Aetna", "Harvard Pilgrim"],
+          services: ["Internal Medicine", "Preventive Care", "Diabetes Management"],
+          rating: 4.7,
+          available: true
+        }
+      ],
+      lastUpdated: "2024-01-15T10:30:00Z"
+    };
+
+    const validatedData = ProvidersDataSchema.parse(inlineData);
+    this.providersData = validatedData;
+    
+    console.log(`✅ Loaded ${validatedData.providers.length} providers from inline data`);
+    return validatedData;
+  }
+
+  /**
+   * Get all available providers
+   */
+  getProviders(): Provider[] {
+    if (!this.providersData) {
+      throw new Error('Providers not loaded. Call loadProviders() first.');
+    }
+    return this.providersData.providers.filter(p => p.available);
+  }
+
+  /**
+   * Get provider by ID
+   */
+  getProviderById(id: string): Provider | null {
+    const providers = this.getProviders();
+    return providers.find(p => p.id === id) || null;
+  }
+
+  /**
+   * Search providers by criteria
+   */
+  searchProviders(criteria: {
+    specialty?: string;
+    location?: string;
+    insurance?: string;
+    service?: string;
+  }): Provider[] {
+    const providers = this.getProviders();
+    
+    return providers.filter(provider => {
+      if (criteria.specialty && !provider.specialty.toLowerCase().includes(criteria.specialty.toLowerCase())) {
+        return false;
+      }
+      if (criteria.location && !provider.location.toLowerCase().includes(criteria.location.toLowerCase())) {
+        return false;
+      }
+      if (criteria.insurance && !provider.acceptedInsurance.some(ins => 
+        ins.toLowerCase().includes(criteria.insurance!.toLowerCase()))) {
+        return false;
+      }
+      if (criteria.service && !provider.services.some(svc => 
+        svc.toLowerCase().includes(criteria.service!.toLowerCase()))) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Get provider recommendations based on user data
+   */
+  getRecommendations(userInsurance?: string, preferredLocation?: string): Provider[] {
+    const providers = this.getProviders();
+    
+    // Sort by rating and insurance compatibility
+    return providers
+      .filter(provider => {
+        if (userInsurance) {
+          return provider.acceptedInsurance.some(ins => 
+            ins.toLowerCase().includes(userInsurance.toLowerCase()) ||
+            ins.toLowerCase().includes('most major') ||
+            ins.toLowerCase().includes('all plans')
+          );
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        // Prioritize by location match first, then rating
+        const aLocationMatch = preferredLocation ? 
+          a.location.toLowerCase().includes(preferredLocation.toLowerCase()) : false;
+        const bLocationMatch = preferredLocation ? 
+          b.location.toLowerCase().includes(preferredLocation.toLowerCase()) : false;
+        
+        if (aLocationMatch && !bLocationMatch) return -1;
+        if (!aLocationMatch && bLocationMatch) return 1;
+        
+        return b.rating - a.rating; // Higher rating first
+      })
+      .slice(0, 5); // Top 5 recommendations
+  }
+
+  /**
+   * Format provider for display
+   */
+  formatProviderForDisplay(provider: Provider): string {
+    return `**${provider.name}** (${provider.specialty})
+📍 ${provider.location}
+⭐ Rating: ${provider.rating}/5
+📞 ${provider.phone}
+🏥 Services: ${provider.services.slice(0, 3).join(', ')}${provider.services.length > 3 ? '...' : ''}
+💳 Insurance: ${provider.acceptedInsurance.slice(0, 2).join(', ')}${provider.acceptedInsurance.length > 2 ? '...' : ''}`;
+  }
+
+  /**
+   * Format provider list for selection
+   */
+  formatProviderOptions(providers: Provider[]): string {
+    return providers.map((provider, index) => 
+      `${index + 1}. ${provider.name} - ${provider.specialty} (${provider.location})`
+    ).join('\n');
+  }
+}
+
+// Singleton instance
+export const providerService = new ProviderService(); 
