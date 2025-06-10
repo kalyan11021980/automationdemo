@@ -1,0 +1,63 @@
+import { createTool } from '@mastra/core';
+import { z } from 'zod';
+import { bookingConversationManager } from '../agents/main-booking-agent';
+
+// Tool for processing conversational appointment booking messages with memory support
+export const conversationTool = createTool({
+  id: 'conversationTool',
+  description: 'Process conversational appointment booking messages with memory support. This tool handles the entire appointment booking conversation flow, including user identification, provider selection, form analysis, and booking completion. It maintains conversation history and user preferences through memory.',
+  inputSchema: z.object({
+    userMessage: z.string().describe('The user\'s message in the conversation'),
+    resetConversation: z.boolean().optional().default(false).describe('Whether to reset the conversation state (start over)'),
+    threadId: z.string().optional().describe('Unique thread ID for conversation continuity (auto-generated if not provided)'),
+    resourceId: z.string().optional().describe('User/resource ID for memory persistence (extracted from user message if not provided)'),
+  }),
+  outputSchema: z.object({
+    response: z.string().describe('The assistant\'s response to the user'),
+    conversationStage: z.string().describe('Current stage of the conversation'),
+    threadId: z.string().describe('Thread ID used for this conversation'),
+    resourceId: z.string().optional().describe('Resource ID if identified'),
+    success: z.boolean().describe('Whether the message was processed successfully'),
+    memoryUpdated: z.boolean().describe('Whether working memory was updated'),
+  }),
+  execute: async ({ context }) => {
+    try {
+      const { userMessage, resetConversation, threadId, resourceId } = context;
+
+      // Reset conversation if requested
+      if (resetConversation) {
+        bookingConversationManager.reset();
+      }
+
+      // Generate thread ID if not provided
+      const finalThreadId = threadId || `booking_thread_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Try to extract resource ID from user message if not provided (simple extraction)
+      const finalResourceId = resourceId || (userMessage.includes('user_') ? userMessage.match(/user_[a-zA-Z0-9]+/)?.[0] : undefined);
+
+      // Process the user message (memory will be handled by the MainBookingAgent)
+      const response = await bookingConversationManager.processUserMessage(userMessage);
+      
+      const currentState = bookingConversationManager.getState();
+
+      return {
+        response,
+        conversationStage: currentState.stage,
+        threadId: finalThreadId,
+        resourceId: finalResourceId,
+        success: true,
+        memoryUpdated: Boolean(finalResourceId), // Memory is updated when we have a resource ID
+      };
+    } catch (error) {
+      console.error('❌ Error in conversation tool:', error);
+              return {
+          response: "I apologize, but I encountered an error processing your message. Please try again or restart the conversation.",
+          conversationStage: 'error',
+          threadId: context.threadId || 'error_thread',
+          resourceId: context.resourceId,
+          success: false,
+          memoryUpdated: false,
+        };
+    }
+  },
+}); 
